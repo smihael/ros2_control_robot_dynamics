@@ -6,6 +6,10 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
+namespace rclcpp_lifecycle {
+class LifecycleNode;
+}
+
 namespace compliant_controllers {
 
 // Forward-only interface (PIMPL) hiding Pinocchio to reduce rebuild times.
@@ -29,8 +33,29 @@ public:
   // Returns false if not initialized or size mismatch.
   bool update(const Eigen::Ref<const Eigen::VectorXd>& q);
 
+  struct TcpConfiguration {
+    bool enabled{false};
+    Eigen::Vector3d translation{Eigen::Vector3d::Zero()};
+    Eigen::Vector3d rotation_rpy{Eigen::Vector3d::Zero()};
+  };
+
+  // Configure an optional TCP offset relative to the modeled end-effector frame.
+  bool configureTcp(bool enabled,
+                    const Eigen::Vector3d& translation = Eigen::Vector3d::Zero(),
+                    const Eigen::Vector3d& rotation_rpy = Eigen::Vector3d::Zero());
+
+  // Read TCP settings from local parameters and, if provided, a profile parameter node.
+  bool configureTcpFromParameters(const std::shared_ptr<rclcpp_lifecycle::LifecycleNode>& node,
+                                  bool enabled,
+                                  const std::string& profile_node = "");
+
+  bool tcpEnabled() const;
+
   // Get end-effector pose. Returns false if not initialized. Outputs set only on success.
   bool getPose(Eigen::Vector3d& position, Eigen::Quaterniond& orientation) const;
+
+  // Transform a pose expressed at the modeled end-effector frame into the configured TCP frame.
+  bool transformToTcp(Eigen::Vector3d& position, Eigen::Quaterniond& orientation) const;
 
   // Get end-effector Jacobian.  Returns false if not initialized.
   bool getJacobian(Eigen::Ref<Eigen::Matrix<double,6,Eigen::Dynamic>> J_out);

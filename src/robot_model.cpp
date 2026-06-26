@@ -9,7 +9,11 @@
 #include <pinocchio/spatial/se3.hpp>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
+#include <rclcpp/rclcpp.hpp>
+#include <rclcpp_lifecycle/lifecycle_node.hpp>
 
+#include <chrono>
+#include <future>
 #include <mutex>
 #include <optional>
 #include <iostream>
@@ -21,12 +25,54 @@ struct RobotModel::Impl {
   pinocchio::Data data{model};
   pinocchio::FrameIndex ee_id{0};
   std::string ee_name;
+  TcpConfiguration tcp;
   bool initialized{false};
   bool last_update_ok{false};
   int nj{0};
   Eigen::VectorXd q_cache; // sized at init
   std::vector<int> controlled_q_indices;
   std::vector<int> controlled_v_indices;
+
+  Eigen::Matrix3d tcpRotationMatrix() const {
+    const Eigen::AngleAxisd roll(tcp.rotation_rpy.x(), Eigen::Vector3d::UnitX());
+    const Eigen::AngleAxisd pitch(tcp.rotation_rpy.y(), Eigen::Vector3d::UnitY());
+    const Eigen::AngleAxisd yaw(tcp.rotation_rpy.z(), Eigen::Vector3d::UnitZ());
+    return (yaw * pitch * roll).toRotationMatrix();
+  }
+
+  Eigen::Vector3d tcpTranslationWorldFromPlacement(const pinocchio::SE3& placement) const {
+    return placement.rotation() * tcp.translation;
+  }
+
+  void applyTcpToPose(const Eigen::Vector3d& ee_position,
+                      const Eigen::Quaterniond& ee_orientation,
+                      Eigen::Vector3d& position,
+                      Eigen::Quaterniond& orientation) const {
+    if (!tcp.enabled) {
+      position = ee_position;
+      orientation = ee_orientation.normalized();
+      return;
+    }
+
+    const Eigen::Matrix3d ee_rotation = ee_orientation.normalized().toRotationMatrix();
+    const Eigen::Matrix3d tcp_rotation_world = ee_rotation * tcpRotationMatrix();
+    position = ee_position + ee_rotation * tcp.translation;
+    orientation = Eigen::Quaterniond(tcp_rotation_world).normalized();
+  }
+
+  void applyTcpToJacobian(const pinocchio::SE3& placement,
+                          Eigen::Ref<Eigen::Matrix<double, 6, Eigen::Dynamic>> J_out) const {
+    if (!tcp.enabled || tcp.translation.isZero(0.0)) {
+      return;
+    }
+
+    const Eigen::Vector3d offset_world = tcpTranslationWorldFromPlacement(placement);
+    const Eigen::Matrix3d skew =
+      (Eigen::Matrix3d() << 0.0, -offset_world.z(), offset_world.y(),
+                            offset_world.z(), 0.0, -offset_world.x(),
+                           -offset_world.y(), offset_world.x(), 0.0).finished();
+    J_out.topRows<3>().noalias() += skew * J_out.bottomRows<3>();
+  }
 
   bool build(const std::string &urdf_xml, const std::string &ee_hint,
              const std::vector<std::string> &controlled_joints) {
@@ -108,8 +154,9 @@ struct RobotModel::Impl {
   bool pose(Eigen::Vector3d &p, Eigen::Quaterniond &q) const {
     if(!(initialized && last_update_ok)) return false;
     const auto & placement = data.oMf[ee_id];
-    p = placement.translation();
-    q = Eigen::Quaterniond(placement.rotation()).normalized();
+    applyTcpToPose(placement.translation(),
+                   Eigen::Quaterniond(placement.rotation()),
+                   p, q);
     return true;
   }
 
@@ -129,6 +176,7 @@ struct RobotModel::Impl {
       }
       J_out.col(i) = J_full.col(source_col);
     }
+    applyTcpToJacobian(data.oMf[ee_id], J_out.leftCols(used_cols));
     return true;
   }
 
@@ -152,6 +200,7 @@ struct RobotModel::Impl {
       }
       J_used.col(i) = J_full.col(source_col);
     }
+    applyTcpToJacobian(data.oMf[ee_id], J_used);
     J_out.leftCols(used_cols) = J_used;
 
     // Compute J^+ for J_used (6 x used_cols), yielding used_cols x 6.
@@ -297,9 +346,113 @@ bool RobotModel::update(const Eigen::Ref<const Eigen::VectorXd>& q){
   return impl_->update(q);
 }
 
+bool RobotModel::configureTcp(bool enabled,
+                              const Eigen::Vector3d& translation,
+                              const Eigen::Vector3d& rotation_rpy) {
+  if (!impl_) {
+    impl_ = std::make_unique<Impl>();
+  }
+  impl_->tcp.enabled = enabled;
+  impl_->tcp.translation = translation;
+  impl_->tcp.rotation_rpy = rotation_rpy;
+  return true;
+}
+
+bool RobotModel::configureTcpFromParameters(
+  const std::shared_ptr<rclcpp_lifecycle::LifecycleNode>& node,
+  bool enabled,
+  const std::string& profile_node) {
+  if (node == nullptr) {
+    return configureTcp(enabled);
+  }
+
+  Eigen::Vector3d translation = Eigen::Vector3d::Zero();
+  Eigen::Vector3d rotation_rpy = Eigen::Vector3d::Zero();
+  const auto read_vec3 = [](const std::vector<double>& values, Eigen::Vector3d& target) {
+    if (values.size() != 3) {
+      return false;
+    }
+    target << values[0], values[1], values[2];
+    return true;
+  };
+
+  bool configured = false;
+  std::vector<double> values;
+  if (node->get_parameter("end_effector.tcp.translation", values) ||
+      node->get_parameter("end_effector_profile.tcp.translation", values)) {
+    configured = read_vec3(values, translation) || configured;
+  }
+  values.clear();
+  if (node->get_parameter("end_effector.tcp.rotation_rpy", values) ||
+      node->get_parameter("end_effector_profile.tcp.rotation_rpy", values)) {
+    configured = read_vec3(values, rotation_rpy) || configured;
+  }
+
+  if (!profile_node.empty()) {
+    auto parameters_client = std::make_shared<rclcpp::AsyncParametersClient>(node, profile_node);
+    if (parameters_client->wait_for_service(std::chrono::seconds(1))) {
+      const std::vector<std::string> names{
+        "end_effector.use_tcp", "end_effector.tcp.translation", "end_effector.tcp.rotation_rpy",
+        "end_effector_profile.use_tcp", "end_effector_profile.tcp.translation",
+        "end_effector_profile.tcp.rotation_rpy",
+      };
+      auto future = parameters_client->get_parameters(names);
+      if (future.wait_for(std::chrono::seconds(2)) == std::future_status::ready) {
+        for (const auto& parameter : future.get()) {
+          if (parameter.get_type() == rclcpp::ParameterType::PARAMETER_NOT_SET) {
+            continue;
+          }
+
+          const auto& name = parameter.get_name();
+          const auto type = parameter.get_type();
+          if (type == rclcpp::ParameterType::PARAMETER_BOOL &&
+              (name == "end_effector.use_tcp" || name == "end_effector_profile.use_tcp")) {
+            enabled = parameter.as_bool();
+            configured = true;
+          } else if (type == rclcpp::ParameterType::PARAMETER_DOUBLE_ARRAY) {
+            const auto profile_values = parameter.as_double_array();
+            if (name == "end_effector.tcp.translation" ||
+                name == "end_effector_profile.tcp.translation") {
+              configured = read_vec3(profile_values, translation) || configured;
+            } else if (name == "end_effector.tcp.rotation_rpy" ||
+                       name == "end_effector_profile.tcp.rotation_rpy") {
+              configured = read_vec3(profile_values, rotation_rpy) || configured;
+            }
+          }
+        }
+      } else {
+        RCLCPP_WARN(node->get_logger(),
+                    "Timed out reading TCP parameters from '%s'.", profile_node.c_str());
+      }
+    } else {
+      RCLCPP_WARN(node->get_logger(),
+                  "End-effector TCP profile parameter node '%s' is not available.",
+                  profile_node.c_str());
+    }
+  }
+
+  configureTcp(enabled, translation, rotation_rpy);
+  return configured || enabled;
+}
+
+bool RobotModel::tcpEnabled() const {
+  return impl_ && impl_->tcp.enabled;
+}
+
 bool RobotModel::getPose(Eigen::Vector3d &position, Eigen::Quaterniond &orientation) const {
   if(!impl_) return false;
   return impl_->pose(position, orientation);
+}
+
+bool RobotModel::transformToTcp(Eigen::Vector3d& position, Eigen::Quaterniond& orientation) const {
+  if (!impl_) return false;
+  if (!impl_->tcp.enabled) {
+    return true;
+  }
+  const Eigen::Vector3d ee_position = position;
+  const Eigen::Quaterniond ee_orientation = orientation;
+  impl_->applyTcpToPose(ee_position, ee_orientation, position, orientation);
+  return true;
 }
 
 bool RobotModel::getJacobian(Eigen::Ref<Eigen::Matrix<double,6,Eigen::Dynamic>> J_out) {
