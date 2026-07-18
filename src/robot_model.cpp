@@ -71,7 +71,7 @@ struct RobotModel::Impl {
       (Eigen::Matrix3d() << 0.0, -offset_world.z(), offset_world.y(),
                             offset_world.z(), 0.0, -offset_world.x(),
                            -offset_world.y(), offset_world.x(), 0.0).finished();
-    J_out.topRows<3>().noalias() += skew * J_out.bottomRows<3>();
+    J_out.topRows<3>().noalias() -= skew * J_out.bottomRows<3>();
   }
 
   bool build(const std::string &urdf_xml, const std::string &ee_hint,
