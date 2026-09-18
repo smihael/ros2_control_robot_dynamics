@@ -2,9 +2,9 @@
 
 URDF-backed robot kinematics and dynamics support for ros2_control controllers.
 
-This package provides the Pinocchio-based `RobotModel` library used by the compliant controller wrapper to compute end-effector pose, Jacobians, gravity, Coriolis terms, and mass matrices from the robot description. It also provides `RobotDescriptionLoader`, a ROS parameter helper for retrieving URDF XML from a local or remote `robot_description` parameter.
+This package provides a Pinocchio-based `RobotModel`, which can be used in controllers to compute end-effector pose, Jacobians, gravity, Coriolis terms, and mass matrices from the robot description. It also provides `RobotDescriptionLoader`, a ROS parameter helper for retrieving URDF XML from a local or remote `robot_description` parameter.
 
-The public header is installed at:
+The public header can be included as:
 
 ```cpp
 #include <ros2_control_robot_dynamics/robot_model.hpp>

@@ -12,7 +12,7 @@ endif()
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic -Wno-return-type)
-  add_compile_options(-O3 -DNDEBUG -march=native)
+  add_compile_options(-O3 -DNDEBUG)
   add_compile_options(-Wno-maybe-uninitialized -Wno-uninitialized)
 endif()
 
@@ -37,6 +37,10 @@ ament_target_dependencies(robot_model_impl
   pinocchio
   rclcpp
   rclcpp_lifecycle
+)
+
+target_link_libraries(robot_model_impl
+  pinocchio::pinocchio_parsers
 )
 
 install(TARGETS robot_model_impl

@@ -6,7 +6,6 @@
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/rnea.hpp>
 #include <pinocchio/algorithm/crba.hpp>
-#include <pinocchio/spatial/se3.hpp>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <rclcpp/rclcpp.hpp>
